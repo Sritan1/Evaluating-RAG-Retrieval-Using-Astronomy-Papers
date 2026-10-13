@@ -110,3 +110,22 @@ def test_missing_headers_block_collection(tmp_path):
 def test_invalid_daily_limit_is_rejected(tmp_path, limit):
     with pytest.raises(ValueError):
         UsageLedger(tmp_path / "usage.sqlite", daily_limit=limit)
+
+
+def test_usage_totals_include_previous_utc_days(tmp_path):
+    clock = [datetime(2026, 10, 12, tzinfo=timezone.utc)]
+    path = tmp_path / "usage.sqlite"
+    with UsageLedger(path, now=lambda: clock[0]) as ledger:
+        assert ledger.usage_totals() == {
+            "attempts": 0, "reserved_credits": 0, "reported_credits": 0,
+        }
+        first = ledger.reserve(1, preflight=True)
+        ledger.record(first, headers(), 1)
+        clock[0] += timedelta(days=1)
+        second = ledger.reserve(2, preflight=True)
+        ledger.record(second, headers(), 2)
+        assert ledger.usage_totals() == {
+            "attempts": 2, "reserved_credits": 3, "reported_credits": 2,
+        }
+    with UsageLedger(path) as ledger:
+        assert ledger.usage_totals()["attempts"] == 2

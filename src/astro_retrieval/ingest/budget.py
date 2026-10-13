@@ -107,6 +107,13 @@ class UsageLedger:
                 "WHERE day = ?", (used, available, day),
             )
 
+    def usage_totals(self) -> dict[str, int]:
+        row = self._connection.execute(
+            "SELECT COALESCE(SUM(attempts), 0), COALESCE(SUM(reserved), 0), "
+            "COALESCE(SUM(reported), 0) FROM api_usage"
+        ).fetchone()
+        return dict(zip(("attempts", "reserved_credits", "reported_credits"), row))
+
     def close(self) -> None:
         self._connection.close()
 
