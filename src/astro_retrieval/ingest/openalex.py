@@ -42,7 +42,7 @@ class OpenAlexClient:
         params = params or {}
         normalized = json.loads(request_key(endpoint, params))["params"]
         allowed = {"filter", "search", "select", "sort", "per_page", "cursor",
-                   "page", "sample", "seed"}
+                   "page", "sample", "seed", "corpus", "search.title_and_abstract"}
         if set(normalized) - allowed or (endpoint != "/works" and normalized):
             raise ValueError("Unsupported work request parameters")
         return self.cache.get_or_fetch(endpoint, normalized, self._fetch)

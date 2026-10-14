@@ -3,8 +3,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from astro_retrieval.ingest.abstracts import reconstruct_abstract
-from astro_retrieval.ingest.records import index_works
+from astro_retrieval.ingest.records import reconstruct_abstract, index_works
 
 
 @dataclass

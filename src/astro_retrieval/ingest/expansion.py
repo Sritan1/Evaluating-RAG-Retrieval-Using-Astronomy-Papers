@@ -10,10 +10,9 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
-from astro_retrieval.ingest.abstracts import reconstruct_abstract
 from astro_retrieval.ingest.openalex import OpenAlexClient
 from astro_retrieval.ingest.pilot import PilotSample, select_pilot
-from astro_retrieval.ingest.records import index_works, work_id
+from astro_retrieval.ingest.records import reconstruct_abstract, index_works, work_id
 
 
 @dataclass
@@ -160,8 +159,12 @@ def expand_pilot(
 
 
 def write_pilot_report(result: PilotExpansion, path: str | Path) -> None:
+    write_json(result.report, path)
+
+
+def write_json(value: dict, path: str | Path) -> None:
     """Replace one local JSON report only after serialization succeeds."""
-    serialized = json.dumps(result.report, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False)
+    serialized = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None

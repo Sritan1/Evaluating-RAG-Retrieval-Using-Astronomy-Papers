@@ -7,7 +7,7 @@ name = "astronomy-retrieval-evaluation"
 version = "0.1.0"
 description = "A study of astronomy paper retrieval and citation-derived relevance labels."
 requires-python = ">=3.11"
-dependencies = ["requests>=2.32.5,<3"]
+dependencies = ["requests>=2.32.5,<3", "python-dotenv>=1.1,<2"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
