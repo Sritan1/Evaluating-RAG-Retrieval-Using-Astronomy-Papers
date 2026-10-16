@@ -5,6 +5,57 @@ import pytest
 from astro_retrieval.ingest.budget import BudgetError, UsageLedger
 
 
+def account_payload():
+    return {"rate_limit": {
+        "daily_budget_usd": 1, "daily_used_usd": 0.05, "daily_remaining_usd": 0.95,
+        "prepaid_balance_usd": 0, "prepaid_remaining_usd": 0, "resets_in_seconds": 3600,
+    }}
+
+
+def test_account_body_records_9500_credits_and_preserves_reservations(tmp_path):
+    with UsageLedger(tmp_path / "usage.sqlite") as ledger:
+        day = ledger.reserve(1, preflight=True)
+        ledger.record_account(day, account_payload())
+        assert ledger.totals() == {
+            "reserved": 1, "attempts": 1, "reported": 0, "remaining": 9500, "blocked": 0,
+        }
+        ledger.reserve(10)
+        ledger.record_account(day, account_payload())
+        assert ledger.totals()["remaining"] == 9490
+        ledger.block(day)
+        ledger.record_account(day, account_payload())
+        assert ledger.totals()["blocked"] == 1
+        assert ledger.totals()["reserved"] == 11
+        with pytest.raises(BudgetError, match="blocked"):
+            ledger.reserve(1, preflight=True)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("daily_budget_usd", 2), ("daily_remaining_usd", 0.96),
+    ("daily_used_usd", -1), ("daily_remaining_usd", float("nan")),
+    ("daily_budget_usd", True), ("daily_budget_usd", "1"),
+    ("prepaid_balance_usd", 1), ("prepaid_remaining_usd", 1),
+    ("resets_in_seconds", 86401),
+])
+def test_invalid_account_fields_block_collection(tmp_path, field, value):
+    with UsageLedger(tmp_path / "usage.sqlite") as ledger:
+        day = ledger.reserve(1, preflight=True)
+        payload = account_payload()
+        payload["rate_limit"][field] = value
+        with pytest.raises(BudgetError, match="account allowance"):
+            ledger.record_account(day, payload)
+        assert ledger.totals()["blocked"] == 1
+        assert ledger.totals()["remaining"] is None
+
+
+def test_missing_account_fields_block_collection(tmp_path):
+    with UsageLedger(tmp_path / "usage.sqlite") as ledger:
+        day = ledger.reserve(1, preflight=True)
+        with pytest.raises(BudgetError, match="account allowance"):
+            ledger.record_account(day, {"rate_limit": {}})
+        assert ledger.totals()["blocked"] == 1
+
+
 def headers(remaining=100, used=1):
     return {
         "X-RateLimit-Limit": "10000",
@@ -106,7 +157,7 @@ def test_missing_headers_block_collection(tmp_path):
         assert ledger.totals()["blocked"] == 1
 
 
-@pytest.mark.parametrize("limit", [0, -1, True, 1.5, 10001])
+@pytest.mark.parametrize("limit", [0, True, 1.5, 10001])
 def test_invalid_daily_limit_is_rejected(tmp_path, limit):
     with pytest.raises(ValueError):
         UsageLedger(tmp_path / "usage.sqlite", daily_limit=limit)

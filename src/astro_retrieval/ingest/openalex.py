@@ -57,6 +57,31 @@ class OpenAlexClient:
         credits = 10 if url == "https://api.openalex.org/works" else 1
         return self._request(url, params, key, credits)
 
+    def recheck_account(self) -> None:
+        """Perform one explicit account check while retaining all usage counters."""
+        key = os.environ.get("OPENALEX_API_KEY", "").strip()
+        if not key or any(ord(char) < 33 or ord(char) > 126 for char in key):
+            raise OpenAlexError("Set OPENALEX_API_KEY to a valid key before fetching")
+        day = self.ledger.reserve(1, preflight=True, recovery=True)
+        self.ledger.block(day)
+        self._verified_day = None
+        response = None
+        try:
+            response = self._session.get(
+                "https://api.openalex.org/rate-limit", params={},
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=(5, 30), allow_redirects=False,
+            )
+            if response.status_code != 200:
+                raise OpenAlexError("Account recheck did not succeed")
+            self.ledger.record_account(day, response.json(), recovery=True)
+            self._verified_day = day
+        except (requests.exceptions.RequestException, ValueError):
+            raise OpenAlexError("Account recheck failed. Collection remains blocked") from None
+        finally:
+            if response is not None:
+                response.close()
+
     def _request(
         self, url: str, params: dict[str, str], key: str, credits: int,
         *, preflight: bool = False,
@@ -78,8 +103,19 @@ class OpenAlexClient:
                 raise OpenAlexError("Request failed before a usable response") from None
             if response is not None:
                 try:
-                    self.ledger.record(day, response.headers, credits)
                     status = response.status_code
+                    has_usage_headers = any(
+                        name.lower().startswith("x-ratelimit-") for name in response.headers
+                    )
+                    if preflight and status == 200 and not has_usage_headers:
+                        try:
+                            account = response.json()
+                        except ValueError:
+                            self.ledger.block(day)
+                            raise OpenAlexError("Invalid account response") from None
+                        self.ledger.record_account(day, account)
+                        return {}
+                    self.ledger.record(day, response.headers, credits)
                     if status == 200:
                         try:
                             payload = response.json()
@@ -90,7 +126,7 @@ class OpenAlexClient:
                                 self._validate_payload(url, params, payload)
                         except (ValueError, TypeError):
                             raise OpenAlexError("Invalid OpenAlex response") from None
-                        return payload
+                        return {} if preflight else payload
                     if status == 429:
                         remaining = self.ledger.totals(day)["remaining"]
                         if remaining < credits:

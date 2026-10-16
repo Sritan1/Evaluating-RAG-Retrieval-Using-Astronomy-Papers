@@ -1,6 +1,7 @@
 import sqlite3
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from pathlib import Path
 
 
@@ -50,16 +51,18 @@ class UsageLedger:
             row or (0, 0, 0, None, 0),
         ))
 
-    def reserve(self, credits: int, *, preflight: bool = False) -> str:
+    def reserve(self, credits: int, *, preflight: bool = False, recovery: bool = False) -> str:
         if type(credits) is not int or credits < 1:
             raise ValueError("Reserve a positive integer number of credits")
+        if recovery and (not preflight or credits != 1):
+            raise ValueError("Recovery is restricted to a one-credit account check")
         day = self.day()
         with self._connection:
             self._connection.execute(
                 "INSERT OR IGNORE INTO api_usage (day) VALUES (?)", (day,)
             )
             totals = self.totals(day)
-            if totals["blocked"]:
+            if totals["blocked"] and not recovery:
                 raise BudgetError("Collection is blocked for this UTC day")
             if totals["reserved"] + credits > self.daily_limit:
                 raise BudgetError("Local daily credit allowance exhausted")
@@ -113,6 +116,44 @@ class UsageLedger:
             "COALESCE(SUM(reported), 0) FROM api_usage"
         ).fetchone()
         return dict(zip(("attempts", "reserved_credits", "reported_credits"), row))
+
+    def record_account(self, day: str, payload: dict, *, recovery: bool = False) -> None:
+        """Validate dollar-denominated account allowance without saving the response."""
+        if day != self.day():
+            raise BudgetError("UTC day changed during the request. Restart collection")
+        try:
+            account = payload["rate_limit"]
+            values = []
+            for field in ("daily_budget_usd", "daily_used_usd", "daily_remaining_usd",
+                          "prepaid_balance_usd", "prepaid_remaining_usd"):
+                raw = account[field]
+                if type(raw) not in (int, float):
+                    raise ValueError
+                value = Decimal(str(raw))
+                if not value.is_finite() or value < 0:
+                    raise ValueError
+                values.append(value)
+            budget, used, remaining, prepaid, prepaid_remaining = values
+            reset = account["resets_in_seconds"]
+            if (budget != 1 or used > budget or remaining > budget
+                    or abs(used + remaining - budget) > Decimal("0.000000001")
+                    or prepaid != 0 or prepaid_remaining != 0
+                    or type(reset) is not int or not 0 <= reset <= 86400):
+                raise ValueError
+            credits = int((remaining * 10000).to_integral_value(rounding=ROUND_FLOOR))
+        except (KeyError, TypeError, ValueError, InvalidOperation):
+            self.block(day)
+            raise BudgetError("Invalid or unsupported account allowance. Review before resuming") from None
+        previous = self.totals(day)["remaining"]
+        available = credits if previous is None else min(previous, credits)
+        if recovery and (available <= 0 or self.totals(day)["reserved"] >= self.daily_limit):
+            raise BudgetError("Verified allowance is insufficient to resume collection")
+        with self._connection:
+            self._connection.execute(
+                "UPDATE api_usage SET remaining = ? WHERE day = ?", (available, day),
+            )
+            if recovery:
+                self._connection.execute("UPDATE api_usage SET blocked = 0 WHERE day = ?", (day,))
 
     def close(self) -> None:
         self._connection.close()

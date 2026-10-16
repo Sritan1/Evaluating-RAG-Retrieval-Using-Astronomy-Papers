@@ -27,6 +27,126 @@ def response(payload=None, *, status=200, remaining=9000, used=0, retry_after=No
     return result
 
 
+def account_response():
+    value = response({"api_key": "private-account-key", "rate_limit": {
+        "daily_budget_usd": 1, "daily_used_usd": 0.05, "daily_remaining_usd": 0.95,
+        "prepaid_balance_usd": 0, "prepaid_remaining_usd": 0, "resets_in_seconds": 3600,
+    }})
+    value.headers.clear()
+    return value
+
+
+def test_recovery_preserves_history_and_allows_work_then_cache(rig, tmp_path):
+    client, session, sleep, ledger, _ = rig
+    day = ledger.reserve(1, preflight=True)
+    ledger.block(day)
+    with pytest.raises(BudgetError, match="blocked"):
+        client.get("/works")
+    session.get.assert_not_called()
+    session.get.return_value = account_response()
+    client.recheck_account()
+    assert ledger.totals() == {
+        "reserved": 2, "attempts": 2, "reported": 0, "remaining": 9500, "blocked": 0,
+    }
+    session.get.return_value = response({"results": []}, used=1)
+    assert client.get("/works") == {"results": []}
+    assert session.get.call_count == 2
+    assert client.get("/works") == {"results": []}
+    assert session.get.call_count == 2
+    assert ledger.totals()["reserved"] == 12
+    sleep.assert_not_called()
+    with UsageLedger(tmp_path / "usage.sqlite") as reopened:
+        assert reopened.totals() == ledger.totals()
+
+
+@pytest.mark.parametrize("failure", ["network", "status", "json", "empty"])
+def test_failed_recovery_stays_blocked_without_retry(rig, failure):
+    client, session, sleep, ledger, _ = rig
+    day = ledger.reserve(1, preflight=True)
+    ledger.block(day)
+    account = account_response()
+    session.get.return_value = account
+    if failure == "network":
+        session.get.side_effect = requests.exceptions.ConnectionError("private-account-key")
+    elif failure == "status":
+        account.status_code = 503
+    elif failure == "json":
+        account.json.side_effect = ValueError("private-account-key")
+    else:
+        account.json.return_value["rate_limit"].update(daily_remaining_usd=0, daily_used_usd=1)
+    with pytest.raises((BudgetError, OpenAlexError)) as error:
+        client.recheck_account()
+    assert "private-account-key" not in str(error.value)
+    assert ledger.totals()["blocked"] == 1
+    assert ledger.totals()["reserved"] == 2
+    assert ledger.totals()["attempts"] == 2
+    session.get.assert_called_once()
+    sleep.assert_not_called()
+    if failure != "network":
+        account.close.assert_called_once()
+
+
+def test_recovery_does_not_bypass_local_limit(rig):
+    client, session, _, ledger, _ = rig
+    day = ledger.reserve(1, preflight=True)
+    ledger.daily_limit = 1
+    ledger.block(day)
+    with pytest.raises(BudgetError, match="Local daily"):
+        client.recheck_account()
+    session.get.assert_not_called()
+    assert ledger.totals()["blocked"] == 1
+    assert ledger.totals()["attempts"] == 1
+
+
+def test_headerless_account_check_then_work_keeps_account_response_private(rig, tmp_path, capsys):
+    client, session, _, ledger, _ = rig
+    account = account_response()
+    session.get.side_effect = [account, response({"results": []}, remaining=9499, used=1)]
+    assert client.get("/works") == {"results": []}
+    assert ledger.totals()["attempts"] == 2
+    assert ledger.totals()["reserved"] == 11
+    assert ledger.totals()["remaining"] == 9490
+    assert session.get.call_count == 2
+    account.close.assert_called_once()
+    output = capsys.readouterr()
+    assert "private-account-key" not in output.out + output.err
+    for path in tmp_path.glob("*.sqlite*"):
+        assert b"private-account-key" not in path.read_bytes()
+
+
+def test_headerless_work_still_blocks_after_valid_account(rig):
+    client, session, _, ledger, _ = rig
+    work = response({"results": []})
+    work.headers.clear()
+    session.get.side_effect = [account_response(), work]
+    with pytest.raises(BudgetError, match="usage headers"):
+        client.get("/works")
+    assert ledger.totals()["blocked"] == 1
+
+
+def test_partial_account_headers_do_not_fall_back(rig):
+    client, session, _, ledger, _ = rig
+    account = account_response()
+    account.headers["X-RateLimit-Limit"] = "10000"
+    session.get.return_value = account
+    with pytest.raises(BudgetError, match="usage headers"):
+        client.get("/works")
+    assert session.get.call_count == 1
+    assert ledger.totals()["blocked"] == 1
+
+
+def test_invalid_account_json_is_sanitized_and_blocks(rig):
+    client, session, _, ledger, _ = rig
+    account = account_response()
+    account.json.side_effect = ValueError("private-account-key")
+    session.get.return_value = account
+    with pytest.raises(OpenAlexError, match="Invalid account response") as error:
+        client.get("/works")
+    assert "private-account-key" not in str(error.value)
+    assert ledger.totals()["blocked"] == 1
+    account.close.assert_called_once()
+
+
 @pytest.fixture
 def rig(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENALEX_API_KEY", "test-only-key")
@@ -104,7 +224,7 @@ def test_retries_stop_after_three_and_do_not_cache_failure(rig):
     assert ledger.totals()["attempts"] == 5
 
 
-@pytest.mark.parametrize("status", [301, 400, 401, 403, 404])
+@pytest.mark.parametrize("status", [301, 400, 401])
 def test_permanent_errors_do_not_retry(rig, status):
     client, session, sleep, _, _ = rig
     failed = response(status=status)
@@ -157,12 +277,12 @@ def test_preflight_timeout_is_counted_and_retried(rig):
     assert ledger.totals()["reserved"] == 12
 
 
-def test_missing_usage_headers_stop_before_work_and_close_response(rig):
+def test_missing_account_headers_and_budget_stop_before_work_and_close_response(rig):
     client, session, _, _, _ = rig
     preflight = response()
     preflight.headers.clear()
     session.get.return_value = preflight
-    with pytest.raises(BudgetError, match="usage headers"):
+    with pytest.raises(BudgetError, match="account allowance"):
         client.get("/works")
     session.get.assert_called_once()
     preflight.close.assert_called_once()
