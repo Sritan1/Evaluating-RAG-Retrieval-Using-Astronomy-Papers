@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from astro_retrieval.ingest.expansion import expand_pilot, write_json
+from astro_retrieval.ingest.pilot import select_pilot
 from astro_retrieval.ingest.records import index_works
 
 
@@ -54,11 +55,31 @@ def load_candidates(path: Path) -> dict:
     return snapshot
 
 
-def run_pilot(client, directory: Path, *, replay: bool = False) -> dict:
+def run_collection(client, directory: Path, *, replay: bool = False, full: bool = False) -> dict:
     before = client.ledger.usage_totals()
-    path = directory / "candidates.json"
-    snapshot = load_candidates(path) if replay else collect_candidates(client, path)
-    result = expand_pilot(snapshot["works"], client)
+    path = Path("data/pilot/candidates.json") if full else directory / "candidates.json"
+    snapshot = load_candidates(path) if replay or full else collect_candidates(client, path)
+    size = 600 if full else 200
+    if full:
+        sample = select_pilot(snapshot["works"], size=size)
+        selection = {
+            "schema_version": 1,
+            "candidate_pool_sha256": snapshot["sha256"],
+            "candidate_parameters": snapshot["parameters"],
+            "requested_candidates": size,
+            "sampling_seed": sample.seed,
+            "candidate_ids": list(sample.candidate_ids),
+        }
+        selection_path = directory / "selection.json"
+        if selection_path.exists():
+            saved = json.loads(selection_path.read_text(encoding="utf-8"))
+            if saved != selection:
+                raise ValueError("Full-run selection does not match the frozen input")
+        elif replay:
+            raise ValueError("Offline full replay requires a saved selection")
+        else:
+            write_json(selection, selection_path)
+    result = expand_pilot(snapshot["works"], client, size=size)
     count = len(result.sample.candidate_ids)
     usable = len(result.sample.abstracts)
     after = client.ledger.usage_totals()
@@ -74,5 +95,5 @@ def run_pilot(client, directory: Path, *, replay: bool = False) -> dict:
         "feasibility_status": "pending",
     }
     bundle = {"report": report, "papers": result.papers, "references": result.references}
-    write_json(bundle, directory / "pilot.json")
+    write_json(bundle, directory / ("collection.json" if full else "pilot.json"))
     return report
