@@ -1,5 +1,7 @@
 import hashlib
 import json
+import math
+import random
 import re
 import sqlite3
 from contextlib import closing
@@ -7,6 +9,7 @@ from datetime import date
 from pathlib import Path
 
 from astro_retrieval.ingest.records import work_id
+from astro_retrieval.ingest.expansion import write_json
 
 
 def _date_fields(raw):
@@ -116,3 +119,87 @@ def build_corpus(snapshot: str | Path, database: str | Path) -> dict[str, int]:
             connection.executemany("INSERT INTO manifest VALUES (?, ?)", manifest)
             connection.execute("PRAGMA user_version = 1")
     return {"papers": len(papers), "seeds": len(seeds), "references": len(references)}
+
+
+def eligible_documents(dates: dict[str, str | None], query_id: str) -> set[str]:
+    query_date = dates.get(query_id)
+    if query_date is None:
+        return set()
+    return {key for key, value in dates.items()
+            if key != query_id and value is not None and value < query_date}
+
+
+def build_evaluation(
+    database: str | Path, snapshot: str | Path, pilot_snapshot: str | Path,
+    output: str | Path, *, seed: int = 42,
+) -> dict:
+    if type(seed) is not int:
+        raise ValueError("Split seed must be an integer")
+    database, snapshot, pilot_snapshot, output = map(
+        Path, (database, snapshot, pilot_snapshot, output),
+    )
+    if output.resolve() in {p.resolve() for p in (database, snapshot, pilot_snapshot)}:
+        raise ValueError("Evaluation output must not replace an input")
+    raw = snapshot.read_bytes()
+    bundle = json.loads(raw)
+    expected = _rows(bundle)
+    with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+        manifest = {key: json.loads(value) for key, value in connection.execute(
+            "SELECT key, value FROM manifest"
+        )}
+        if manifest["source_sha256"] != hashlib.sha256(raw).hexdigest():
+            raise ValueError("Corpus source hash does not match")
+        for table, rows in zip(("papers", "seeds", "refs"), expected):
+            actual = connection.execute(f"SELECT * FROM {table}").fetchall()
+            if sorted(actual) != sorted(rows):
+                raise ValueError("Corpus rows do not match the source snapshot")
+    papers, seeds, references = expected
+    dates = {row[0]: row[4] for row in papers}
+    titles = {row[0]: row[1] for row in papers}
+    cited = {key: set() for key, present in seeds if present}
+    for citing, target in references:
+        cited[citing].add(target)
+    qrels = {}
+    for query_id in sorted(cited):
+        positives = sorted(cited[query_id] & eligible_documents(dates, query_id))
+        if len(positives) >= 8:
+            if not titles[query_id] or not titles[query_id].strip():
+                raise ValueError("Eligible query needs a title for both query forms")
+            qrels[query_id] = positives
+    pilot_raw = pilot_snapshot.read_bytes()
+    pilot = json.loads(pilot_raw)
+    _rows(pilot)
+    if pilot["report"].get("candidate_pool_sha256") != manifest["candidate_pool_sha256"]:
+        raise ValueError("Pilot and full corpus use different candidate pools")
+    pilot_ids = {work_id(value) for value in pilot["report"]["candidate_ids"]}
+    dev = set(qrels) & pilot_ids
+    dev_size = max(math.ceil(0.30 * len(qrels)), len(dev))
+    other = sorted(set(qrels) - dev)
+    dev.update(random.Random(seed).sample(other, dev_size - len(dev)))
+    test = set(qrels) - dev
+    if not test:
+        raise ValueError("No test queries remain after pilot exclusion")
+    result = {
+        "schema_version": 1,
+        "source_sha256": manifest["source_sha256"],
+        "pilot_sha256": hashlib.sha256(pilot_raw).hexdigest(),
+        "candidate_pool_sha256": manifest["candidate_pool_sha256"],
+        "split_seed": seed,
+        "target_dev_fraction": 0.30,
+        "minimum_references": 8,
+        "date_rule": "Valid YYYY-MM-DD, candidate strictly earlier, exclude self",
+        "pilot_excluded_query_ids": sorted(pilot_ids),
+        "splits": {"dev": sorted(dev), "test": sorted(test)},
+        "queries": [
+            {"query_id": f"{key}:{form}", "paper_id": key, "query_type": form,
+             "split": "dev" if key in dev else "test"}
+            for key in sorted(qrels) for form in ("title", "abstract")
+        ],
+        "qrels": qrels,
+    }
+    if output.exists():
+        if json.loads(output.read_text(encoding="utf-8")) != result:
+            raise ValueError("Frozen evaluation differs; preserve it and review inputs")
+    else:
+        write_json(result, output)
+    return result
