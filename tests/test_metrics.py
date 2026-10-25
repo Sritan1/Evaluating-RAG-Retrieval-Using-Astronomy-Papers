@@ -1,9 +1,13 @@
 import random
+from copy import deepcopy
 
 import pytest
 from sklearn.metrics import ndcg_score, recall_score
 
-from astro_retrieval.metrics import bootstrap_mean, ndcg_at_k, recall_at_k, reciprocal_rank_at_k, score_query
+from astro_retrieval.metrics import (
+    bootstrap_mean, compare_hypotheses, holm_adjust, ndcg_at_k, paired_sign_flip,
+    recall_at_k, reciprocal_rank_at_k, score_query,
+)
 
 
 def test_reviewed_example():
@@ -74,3 +78,56 @@ def test_bootstrap_rejects_missing_and_nonfinite_scores():
             bootstrap_mean(scores)
     with pytest.raises(ValueError, match="identical papers"):
         bootstrap_mean({"A": .2}, reference={"B": .2})
+
+
+def test_sign_flip_exact_values_symmetry_and_seeded_replay():
+    assert paired_sign_flip({"A": 1, "B": 1})["p_value"] == .5
+    assert paired_sign_flip({"A": 0, "B": 0})["p_value"] == 1
+    values = {f"P{i}": (i - 4) / 20 for i in range(15)}
+    result = paired_sign_flip(values)
+    assert result["method"] == "monte_carlo" and result["draws"] == 10000
+    assert result == paired_sign_flip(dict(reversed(list(values.items()))))
+    assert result["p_value"] == paired_sign_flip({key: -v for key, v in values.items()})["p_value"]
+    assert 0 < result["p_value"] <= 1
+    for values in ({}, {"A": float("nan")}, {"A": float("inf")}):
+        with pytest.raises(ValueError):
+            paired_sign_flip(values)
+    with pytest.raises(ValueError, match="identical papers"):
+        paired_sign_flip({"A": .2}, reference={"B": .2})
+    from scipy.stats import permutation_test
+    reference = permutation_test(([.2, -.1, .4],), lambda x: sum(x) / len(x),
+                                 permutation_type="samples", n_resamples=float("inf"))
+    assert paired_sign_flip(dict(zip("ABC", [.2, -.1, .4])))["p_value"] == pytest.approx(reference.pvalue)
+
+
+def test_holm_adjustment_preserves_names_and_rejects_invalid_probabilities():
+    values = dict(zip("ABCD", [.01, .03, .04, .20]))
+    assert holm_adjust(values) == pytest.approx(dict(zip("ABCD", [.04, .09, .09, .20])))
+    assert holm_adjust(dict(reversed(list(values.items())))) == holm_adjust(values)
+    for values in ({}, {"A": float("nan")}, {"A": -1}, {"A": 1.1}):
+        with pytest.raises(ValueError):
+            holm_adjust(values)
+
+
+def test_planned_contrasts_keep_papers_paired_and_validate_inputs():
+    systems = {name: {form: {paper: {"recall@100": .1, "ndcg@10": .4}
+                                  for paper in ("A", "B")}
+                      for form in ("title", "abstract")}
+               for name in ("bm25", "hybrid", "reranker", "popularity", "random")}
+    for paper in ("A", "B"):
+        systems["reranker"]["title"][paper]["ndcg@10"] = .6
+        systems["reranker"]["abstract"][paper]["ndcg@10"] = .3
+    result = compare_hypotheses(systems)
+    assert result["family"] == ["H1-title", "H1-abstract", "H2", "H3"]
+    assert result["contrasts"]["H2"]["bootstrap"]["mean"] == pytest.approx(.3)
+    assert result["contrasts"]["H2"]["test"]["p_value"] == .5
+    assert not result["h1_supported"]
+    assert compare_hypotheses(systems) == result
+    missing = deepcopy(systems)
+    del missing["hybrid"]["abstract"]["B"]
+    with pytest.raises(ValueError, match="identical papers"):
+        compare_hypotheses(missing)
+    invalid = deepcopy(systems)
+    invalid["reranker"]["title"]["A"]["ndcg@10"] = float("nan")
+    with pytest.raises(ValueError, match="finite"):
+        compare_hypotheses(invalid)
