@@ -1,4 +1,4 @@
-# Astronomy Paper Search Evaluation: Results
+# Evaluating RAG Retrieval Using Astronomy Papers: Results
 
 Combining keyword and embedding search found more cited papers when searching with abstracts. For titles, the improvement was inconclusive. Reranking helped title ordering but made abstract ordering worse.
 

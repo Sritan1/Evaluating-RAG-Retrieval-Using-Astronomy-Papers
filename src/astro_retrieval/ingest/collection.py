@@ -94,6 +94,16 @@ def run_collection(client, directory: Path, *, replay: bool = False, full: bool 
         "runtime_status": "not_measured",
         "feasibility_status": "pending",
     }
-    bundle = {"report": report, "papers": result.papers, "references": result.references}
-    write_json(bundle, directory / ("collection.json" if full else "pilot.json"))
+    bundle = {"report": report, "papers": result.papers,
+              "references": {key: list(values) for key, values in result.references.items()}}
+    output = directory / ("collection.json" if full else "pilot.json")
+    if output.exists():
+        saved = json.loads(output.read_text(encoding="utf-8"))
+        original_run = {key: saved["report"][key] for key in (
+            "python_version", "current_run_api_usage", "reference_lookup_api_usage",
+        )}
+        if saved != {**bundle, "report": {**report, **original_run}}:
+            raise ValueError("Completed collection differs; use a new output directory")
+    else:
+        write_json(bundle, output)
     return report

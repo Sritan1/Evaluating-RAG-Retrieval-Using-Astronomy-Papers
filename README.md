@@ -1,4 +1,4 @@
-# Astronomy Paper Search Evaluation
+# Evaluating RAG Retrieval Using Astronomy Papers
 
 RAG (Retrieval-Augmented Generation) systems search for relevant documents before using them to help generate an answer. I built this project to compare seven search methods used in that retrieval step, from keyword search to embeddings, hybrid search and reranking.
 

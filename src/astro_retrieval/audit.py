@@ -237,11 +237,15 @@ def prepare_model_practice(database, evaluation_path, ranking_paths, practice_di
                 or packet_path.read_bytes() != packet):
             raise ValueError("Existing model practice export differs or is incomplete")
         return packet_path
-    directory.mkdir(parents=True, exist_ok=False)
-    packet_path.write_bytes(packet)
-    for judge in ("chatgpt", "gemini"):
-        (directory / judge).mkdir()
-    write_json(manifest, manifest_path)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=directory.parent, prefix=".pending-") as temporary:
+        staging = Path(temporary) / directory.name
+        staging.mkdir()
+        (staging / packet_path.name).write_bytes(packet)
+        for judge in ("chatgpt", "gemini"):
+            (staging / judge).mkdir()
+        write_json(manifest, staging / manifest_path.name)
+        staging.rename(directory)
     return packet_path
 
 
@@ -304,11 +308,15 @@ def prepare_model_main(database, evaluation_path, ranking_paths, rubric_path, pr
     elif verify_only:
         raise ValueError("Main export is missing")
     else:
-        directory.mkdir(parents=True, exist_ok=False)
-        for name, raw in packets.items():
-            (directory / name).write_bytes(raw)
-        write_json(mapping, directory / "private-mapping.json")
-        write_json(manifest, directory / "manifest.json")
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=directory.parent, prefix=".pending-") as temporary:
+            staging = Path(temporary) / directory.name
+            staging.mkdir()
+            for name, raw in packets.items():
+                (staging / name).write_bytes(raw)
+            write_json(mapping, staging / "private-mapping.json")
+            write_json(manifest, staging / "manifest.json")
+            staging.rename(directory)
     if verify_only:
         return [directory / name for name in packets]
     for judge in protocol["judges"]:

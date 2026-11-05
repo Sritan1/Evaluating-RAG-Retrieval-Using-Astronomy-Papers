@@ -9,6 +9,7 @@ import requests
 
 from astro_retrieval.__main__ import OfflineClient, main
 from astro_retrieval import __main__ as cli
+from astro_retrieval.corpus import build_corpus
 from astro_retrieval.ingest.budget import BudgetError, UsageLedger
 from astro_retrieval.ingest.cache import ResponseCache
 from astro_retrieval.ingest.collection import (
@@ -147,7 +148,7 @@ def test_offline_cache_miss_stops_before_credentials_or_network(tmp_path):
             assert ledger.usage_totals()["attempts"] == 0
 
 
-def test_full_run_resumes_budget_stop_and_replays_without_touching_pilot(client, tmp_path, monkeypatch):
+def test_full_run_resumes_budget_stop_and_replays_without_touching_pilot(client, tmp_path, monkeypatch, capsys):
     works = records(599, 600)
     works[0]["referenced_works"] = ["W1001", "W1002"]
     client.iter_works.return_value = works
@@ -203,18 +204,32 @@ def test_full_run_resumes_budget_stop_and_replays_without_touching_pilot(client,
     assert report["usable_seed_count"] == 599
     assert report["seed_missing_abstract_ids"] == ["W600"]
     assert (full / "selection.json").read_bytes() == selection
-    completed = json.loads((full / "collection.json").read_text(encoding="utf-8"))
+    snapshot = full / "collection.json"
+    completed = snapshot.read_bytes()
+    assert json.loads(completed)["report"]["current_run_api_usage"]["attempts"] == 2
+    database = full / "papers.sqlite"
+    build_corpus(snapshot, database)
+    database_bytes = database.read_bytes()
 
     monkeypatch.delenv("OPENALEX_API_KEY")
     monkeypatch.setattr(cli, "load_dotenv", Mock(side_effect=AssertionError("Credentials loaded")))
     assert main(["--full", "--replay"]) == 0
-    replayed = json.loads((full / "collection.json").read_text(encoding="utf-8"))
-    assert replayed["papers"] == completed["papers"]
-    assert replayed["references"] == completed["references"]
-    assert replayed["report"]["current_run_api_usage"]["attempts"] == 0
+    assert json.loads(capsys.readouterr().out)["current_run_api_usage"]["attempts"] == 0
+    assert snapshot.read_bytes() == completed
+    assert database.read_bytes() == database_bytes
     with UsageLedger(ledger_path) as ledger:
         assert ledger.usage_totals()["attempts"] == 4
     assert {path.name: path.read_bytes() for path in pilot.iterdir()} == original
+    changed = json.loads(completed)
+    changed["papers"]["W1"]["title"] = "Conflicting saved title"
+    snapshot.write_text(json.dumps(changed), encoding="utf-8")
+    conflicting = snapshot.read_bytes()
+    with ResponseCache(cache_path) as cache, UsageLedger(ledger_path) as ledger:
+        with OfflineClient(cache, ledger) as offline:
+            with pytest.raises(ValueError, match="Completed collection differs"):
+                run_collection(offline, full, full=True, replay=True)
+    assert snapshot.read_bytes() == conflicting
+    assert database.read_bytes() == database_bytes
 
 
 def test_sampling_is_independent_of_input_order_and_duplicates():

@@ -4,6 +4,7 @@ from copy import deepcopy
 
 import pytest
 
+import astro_retrieval.audit as audit
 from astro_retrieval.audit import (
     FIELDS, SYSTEMS, JUDGING_PROMPT, import_judgments, main_progress, parse_judgments,
     prepare_audit, prepare_model_main, prepare_model_practice, sample_pairs,
@@ -54,7 +55,7 @@ def test_sampling_keeps_unique_pairs_and_fixed_citation_counts(audit_inputs):
         sample_pairs(bad, evaluation, dates)
 
 
-def test_audit_workflow_from_practice_to_saved_analysis(audit_inputs, tmp_path):
+def test_audit_workflow_from_practice_to_saved_analysis(audit_inputs, tmp_path, monkeypatch):
     papers, evaluation, rankings = audit_inputs
 
     def save(name, value):
@@ -64,6 +65,21 @@ def test_audit_workflow_from_practice_to_saved_analysis(audit_inputs, tmp_path):
 
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def interrupted_export(run, destination):
+        write_json = audit.write_json
+
+        def fail_manifest(value, path):
+            if path.name == "manifest.json":
+                raise OSError("Interrupted manifest write")
+            write_json(value, path)
+
+        with monkeypatch.context() as context:
+            context.setattr(audit, "write_json", fail_manifest)
+            with pytest.raises(OSError, match="Interrupted manifest"):
+                run()
+        assert not destination.exists()
+        assert not list(destination.parent.glob(".pending-*"))
 
     snapshot = save("collection.json", {"report": {"schema_version": 1,
                     "candidate_ids": list(evaluation["qrels"])}, "papers": papers,
@@ -92,6 +108,7 @@ def test_audit_workflow_from_practice_to_saved_analysis(audit_inputs, tmp_path):
     rubric.write_text("Revised two-model practice rubric", encoding="utf-8")
     judges = {name: {"model": name + " synthetic", "mode": "high"} for name in ("chatgpt", "gemini")}
     packet_args = (database, evaluation_path, reports, path.parent, rubric, tmp_path / "model-practice")
+    interrupted_export(lambda: prepare_model_practice(*packet_args, judges=judges), packet_args[-1])
     packet = prepare_model_practice(*packet_args, judges=judges)
     items = json.loads(packet.read_text(encoding="utf-8").split("Paper pairs (JSON data):\n")[1])
     assert len(items) == 6 and all(set(item) == set(FIELDS[:-2]) for item in items)
@@ -100,6 +117,8 @@ def test_audit_workflow_from_practice_to_saved_analysis(audit_inputs, tmp_path):
     assert all(key not in packet.read_text(encoding="utf-8") for key in papers)
     manifest = json.loads((packet.parent / "manifest.json").read_text())
     assert manifest["judges"] == judges
+    assert manifest["packet_sha256"] == digest(packet)
+    assert prepare_model_practice(*packet_args, judges=judges) == packet
     assert manifest["packet_sha256"] == digest(packet)
     assert path.read_bytes() == practice_bytes
 
@@ -129,6 +148,7 @@ def test_audit_workflow_from_practice_to_saved_analysis(audit_inputs, tmp_path):
     output = tmp_path / "model-main"
     args = database, evaluation_path, test_reports, rubric, packet.parent, protocol, output
     protected = {file: file.read_bytes() for file in packet.parent.rglob("*") if file.is_file()}
+    interrupted_export(lambda: prepare_model_main(*args, protocol_sha256=digest(protocol)), output)
     packets = prepare_model_main(*args, protocol_sha256=digest(protocol))
     main_manifest = json.loads((output / "manifest.json").read_text())
     all_ids = []
