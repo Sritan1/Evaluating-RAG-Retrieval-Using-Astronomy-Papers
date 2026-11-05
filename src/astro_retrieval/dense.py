@@ -13,7 +13,7 @@ import numpy as np
 
 from astro_retrieval.baselines import score_run, summarize_scores
 from astro_retrieval.corpus import eligible_documents
-from astro_retrieval.ingest.expansion import write_json
+from astro_retrieval.ingest.expansion import reports_match, write_json
 
 
 def normalize_vectors(values):
@@ -272,14 +272,14 @@ def run_dense(database, evaluation_path, baseline_path, bm25_path, cache_directo
                 "longest_input_tokens": max(lengths)}
     result["differences"] = {system: summarize_scores(result["scores"], reference=scores)
                              for system, scores in references.items()}
-    result["interval_note"] = "95% paired paper bootstrap, 2000 draws, seed 42; development comparisons"
+    result["interval_note"] = "95% paired paper bootstrap, 2000 draws, seed 42. Development comparisons"
     if any(hashlib.sha256(path.read_bytes()).hexdigest() != hashes[path] for path in inputs):
         raise ValueError("Inputs changed during the dense run")
     if time.monotonic() >= deadline:
         raise TimeoutError("Dense run reached its four-hour budget")
     if output.exists():
-        if json.loads(output.read_text(encoding="utf-8")) != result:
-            raise ValueError("Existing dense output differs; use a new path")
+        if not reports_match(json.loads(output.read_text(encoding="utf-8")), result):
+            raise ValueError("Existing dense output differs. Use a new path")
     else:
         write_json(result, output)
     return result

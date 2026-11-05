@@ -8,7 +8,7 @@ from collections import Counter
 from contextlib import closing
 from pathlib import Path
 
-from astro_retrieval.ingest.expansion import write_json
+from astro_retrieval.ingest.expansion import reports_match, write_json
 from astro_retrieval.corpus import eligible_documents
 from astro_retrieval.baselines import score_run, summarize_scores
 
@@ -61,8 +61,8 @@ def build_saved_index(database: str | Path, output: str | Path) -> dict:
     result["source_sha256"] = manifest["source_sha256"]
     result["database_sha256"] = hashlib.sha256(database.read_bytes()).hexdigest()
     if output.exists():
-        if json.loads(output.read_text(encoding="utf-8")) != result:
-            raise ValueError("Existing index differs; use a new path")
+        if not reports_match(json.loads(output.read_text(encoding="utf-8")), result):
+            raise ValueError("Existing index differs. Use a new path")
     else:
         write_json(result, output)
     return result
@@ -170,11 +170,11 @@ def run_bm25(database, index_path, evaluation_path, baseline_path, output, *, pr
         "summary": summarize_scores(selected["scores"]),
         "differences": {system: summarize_scores(selected["scores"], reference=scores)
                         for system, scores in reference_scores.items()},
-        "interval_note": "95% paired paper bootstrap, 2000 draws, seed 42; dev selection bias not corrected",
+        "interval_note": "95% paired paper bootstrap, 2000 draws, seed 42. Dev selection bias not corrected",
     }
     if output.exists():
-        if json.loads(output.read_text(encoding="utf-8")) != result:
-            raise ValueError("Existing BM25 output differs; use a new path")
+        if not reports_match(json.loads(output.read_text(encoding="utf-8")), result):
+            raise ValueError("Existing BM25 output differs. Use a new path")
     else:
         write_json(result, output)
     return result

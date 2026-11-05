@@ -12,7 +12,7 @@ from astro_retrieval.baselines import baseline_ranking, score_run, summarize_sco
 from astro_retrieval.bm25 import build_index, rank_bm25
 from astro_retrieval.dense import EmbeddingEncoder, encode_cached, rank_dense
 from astro_retrieval.hybrid import rank_fusion
-from astro_retrieval.ingest.expansion import write_json
+from astro_retrieval.ingest.expansion import reports_match, write_json
 from astro_retrieval.metrics import compare_hypotheses
 from astro_retrieval.rerank import PairScorer, _digest, rerank_top, score_cached
 
@@ -215,7 +215,7 @@ def run_evaluation(database, evaluation_path, index_path, general_documents, ind
     report_progress("complete")
     output = directory / "report.json"
     if output.exists():
-        if json.loads(output.read_text(encoding="utf-8")) != result:
+        if not reports_match(json.loads(output.read_text(encoding="utf-8")), result):
             raise ValueError("Existing final report differs")
     else:
         if replay_only:
@@ -249,7 +249,7 @@ def rebuild_results(evaluation_args, audit_args, destination, *, protocol_sha256
             raise ValueError("Temporary output escaped the destination parent")
         retrieval = run_evaluation(*evaluation_args[:-1], staging / "test", cached_inference=reference,
                                    progress=progress)
-        if retrieval != expected:
+        if not reports_match(expected, retrieval):
             raise ValueError("Rebuilt retrieval report differs from the original")
         for name in retrieval["systems"]:
             original = json.loads((reference / f"{name}.json").read_text(encoding="utf-8"))

@@ -116,6 +116,10 @@ def test_fixed_runner_resumes_and_replays_without_inference(experiment, monkeypa
         assert all(r["score_type"] == "rrf_tail" for r in second[10:])
     monkeypatch.setattr(type(e.encoders["general"]), "__call__", lambda *a: pytest.fail("Loaded encoder"))
     monkeypatch.setattr(type(e.scorer), "__call__", lambda *a: pytest.fail("Loaded scorer"))
+    report_path = output / "report.json"
+    legacy = json.loads(report_path.read_text())
+    legacy["comparisons"]["inference_note"] = "Sign-flip assumptions apply; development results are exploratory"
+    report_path.write_text(json.dumps(legacy))
     assert runner.run_evaluation(*e.args, encoders=e.encoders, scorer=e.scorer) == result
     saved_files = {p: p.read_bytes() for p in output.rglob("*") if p.is_file()}
     assert runner.run_evaluation(*e.args, encoders=e.encoders, scorer=e.scorer, replay_only=True) == result
@@ -216,6 +220,9 @@ def test_fresh_rebuild_recomputes_rankings_and_publishes_only_complete_bundle(ex
     e = experiment
     expected = runner.run_evaluation(*e.args, encoders=e.encoders, scorer=e.scorer)
     source = e.args[-1]
+    legacy = json.loads((source / "report.json").read_text())
+    legacy["comparisons"]["inference_note"] = "Sign-flip assumptions apply; development results are exploratory"
+    (source / "report.json").write_text(json.dumps(legacy))
     root = source.parent
     audit_source = root / "audit-source"
     audit_source.mkdir()

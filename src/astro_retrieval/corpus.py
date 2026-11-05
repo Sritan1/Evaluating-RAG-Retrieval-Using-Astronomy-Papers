@@ -199,7 +199,7 @@ def build_evaluation(
     }
     if output.exists():
         if json.loads(output.read_text(encoding="utf-8")) != result:
-            raise ValueError("Frozen evaluation differs; preserve it and review inputs")
+            raise ValueError("Frozen evaluation differs. Preserve it and review inputs")
     else:
         write_json(result, output)
     return result

@@ -162,6 +162,25 @@ def write_pilot_report(result: PilotExpansion, path: str | Path) -> None:
     write_json(result.report, path)
 
 
+def reports_match(saved: dict, current: dict) -> bool:
+    if not isinstance(saved, dict) or not isinstance(current, dict):
+        return saved == current
+    if saved == current:
+        return True
+    if saved.keys() != current.keys():
+        return False
+    for key, value in saved.items():
+        if key in {"popularity_rule", "interval_method", "interval_note", "inference_note"} and isinstance(value, str):
+            value = re.sub(r"; ([A-Za-z])", lambda match: ". " + match[1].upper(), value)
+        elif key == "comparisons" and isinstance(value, dict) and isinstance(current[key], dict):
+            if not reports_match(value, current[key]):
+                return False
+            continue
+        if value != current[key]:
+            return False
+    return True
+
+
 def write_json(value: dict, path: str | Path) -> None:
     """Replace one local JSON report only after serialization succeeds."""
     serialized = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False)

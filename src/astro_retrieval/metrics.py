@@ -161,4 +161,4 @@ def compare_hypotheses(system_scores):
     return {"contrasts": results, "family": list(contrasts), "correction": "Holm", "alpha": .05,
             "h1_supported": results["H1-title"]["supported"] and results["H1-abstract"]["supported"],
             "interval_note": "Marginal 95% paper bootstrap intervals, not multiplicity-adjusted",
-            "inference_note": "Sign-flip assumptions apply; development results are exploratory"}
+            "inference_note": "Sign-flip assumptions apply. Development results are exploratory"}

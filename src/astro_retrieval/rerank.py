@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from astro_retrieval.baselines import score_run, summarize_scores
-from astro_retrieval.ingest.expansion import write_json
+from astro_retrieval.ingest.expansion import reports_match, write_json
 
 
 def rerank_top(ranking, scored, *, depth=20):
@@ -264,13 +264,13 @@ def run_rerank(database, evaluation_path, hybrid_path, cache_path, output, *,
               "rankings": reranked, "scores": scores, "summary": summarize_scores(scores),
               "differences": {"hybrid": summarize_scores(scores, reference=reference)},
               "truncation": truncation, "ranking_rule": "Rerank prefix by raw score then ID, preserve tail",
-              "interval_note": "95% paired paper bootstrap, 2000 draws, seed 42; development comparisons"}
+              "interval_note": "95% paired paper bootstrap, 2000 draws, seed 42. Development comparisons"}
     if any(hashlib.sha256(path.read_bytes()).hexdigest() != hashes[path] for path in inputs):
         raise ValueError("Inputs changed during reranking")
     report_progress({"completed": len(pairs), "total": len(pairs)})
     if output.exists():
-        if json.loads(output.read_text(encoding="utf-8")) != result:
-            raise ValueError("Existing reranker output differs; use a new path")
+        if not reports_match(json.loads(output.read_text(encoding="utf-8")), result):
+            raise ValueError("Existing reranker output differs. Use a new path")
     else:
         write_json(result, output)
     return result
@@ -327,12 +327,12 @@ def run_depth_comparison(database, evaluation_path, hybrid_path, cache_path, bas
                                                                           reference=baseline["scores"]),
                               "selected_minus_hybrid": summarize_scores(trials[best]["scores"],
                                                                           reference=reference)},
-              "interval_note": "95% paired paper bootstrap, 2000 draws, seed 42; dev selection bias not corrected"}
+              "interval_note": "95% paired paper bootstrap, 2000 draws, seed 42. Dev selection bias not corrected"}
     if any(hashlib.sha256(path.read_bytes()).hexdigest() != hashes[path] for path in inputs):
         raise ValueError("Inputs changed during depth comparison")
     if output.exists():
-        if json.loads(output.read_text(encoding="utf-8")) != result:
-            raise ValueError("Existing depth comparison differs; use a new path")
+        if not reports_match(json.loads(output.read_text(encoding="utf-8")), result):
+            raise ValueError("Existing depth comparison differs. Use a new path")
     else:
         write_json(result, output)
     return result
@@ -435,13 +435,13 @@ def run_chunk_comparison(database, evaluation_path, hybrid_path, baseline_cache,
               "differences": {trial["method"]: {
                   "truncation": summarize_scores(trial["scores"], reference=baseline["scores"]),
                   "hybrid": summarize_scores(trial["scores"], reference=reference)} for trial in trials[1:]},
-              "interval_note": "95% paired paper bootstrap, 2000 draws, seed 42; dev selection bias not corrected"}
+              "interval_note": "95% paired paper bootstrap, 2000 draws, seed 42. Dev selection bias not corrected"}
     if any(hashlib.sha256(path.read_bytes()).hexdigest() != hashes[path] for path in paths):
         raise ValueError("Inputs changed during chunk comparison")
     report_progress({"completed": len(expanded), "total": len(expanded)})
     if output.exists():
-        if json.loads(output.read_text(encoding="utf-8")) != result:
-            raise ValueError("Existing chunk comparison differs; use a new path")
+        if not reports_match(json.loads(output.read_text(encoding="utf-8")), result):
+            raise ValueError("Existing chunk comparison differs. Use a new path")
     else:
         write_json(result, output)
     return result

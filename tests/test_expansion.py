@@ -9,7 +9,7 @@ from requests.structures import CaseInsensitiveDict
 
 from astro_retrieval.ingest.budget import UsageLedger
 from astro_retrieval.ingest.cache import ResponseCache
-from astro_retrieval.ingest.expansion import expand_pilot, write_pilot_report
+from astro_retrieval.ingest.expansion import expand_pilot, reports_match, write_pilot_report
 from astro_retrieval.ingest.openalex import OpenAlexClient
 
 
@@ -187,6 +187,21 @@ def test_report_is_valid_json_and_rewriting_does_not_append(example, client, tmp
     with pytest.raises(ValueError):
         write_pilot_report(result, path)
     assert path.read_bytes() == first
+
+
+def test_report_comparison_accepts_only_description_punctuation_changes():
+    saved = {"interval_note": "Seed 42; development comparisons", "score": 0.5,
+             "comparisons": {"inference_note": "Assumptions apply; results are exploratory"}}
+    current = {"interval_note": "Seed 42. Development comparisons", "score": 0.5,
+               "comparisons": {"inference_note": "Assumptions apply. Results are exploratory"}}
+    before = copy.deepcopy(saved)
+    assert reports_match(saved, current)
+    assert saved == before
+    for changed in ({**current, "score": 0.6}, {**current, "interval_note": "Different analysis"},
+                    {**current, "comparisons": {"inference_note": "Assumptions do not apply"}}):
+        assert not reports_match(saved, changed)
+    assert not reports_match({"title": "A; b"}, {"title": "A. B"})
+    assert not reports_match([], current)
 
 
 def response(payload=None):

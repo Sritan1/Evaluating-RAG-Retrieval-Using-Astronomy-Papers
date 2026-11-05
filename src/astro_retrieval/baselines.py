@@ -7,7 +7,7 @@ from contextlib import closing
 from pathlib import Path
 
 from astro_retrieval.corpus import eligible_documents
-from astro_retrieval.ingest.expansion import write_json
+from astro_retrieval.ingest.expansion import reports_match, write_json
 from astro_retrieval.metrics import bootstrap_mean, score_query
 
 
@@ -105,16 +105,16 @@ def run_baselines(database, evaluation_path, output, *, seed=42, resamples=2000)
         "evaluation_sha256": hashlib.sha256(raw).hexdigest(),
         "database_sha256": hashlib.sha256(database.read_bytes()).hexdigest(),
         "source_sha256": evaluation["source_sha256"],
-        "popularity_rule": "Distinct citations from collected seeds strictly earlier than query; ID ties",
-        "interval_method": "Paper-level percentile bootstrap, 95%, paired draws; no multiplicity adjustment",
+        "popularity_rule": "Distinct citations from collected seeds strictly earlier than query. ID ties",
+        "interval_method": "Paper-level percentile bootstrap, 95%, paired draws. No multiplicity adjustment",
         "systems": results,
         "popularity_minus_random": summarize_scores(
             results["popularity"]["scores"], reference=results["random"]["scores"],
             resamples=resamples, seed=seed),
     }
     if output.exists():
-        if json.loads(output.read_text(encoding="utf-8")) != result:
-            raise ValueError("Existing baseline output differs; use a new path")
+        if not reports_match(json.loads(output.read_text(encoding="utf-8")), result):
+            raise ValueError("Existing baseline output differs. Use a new path")
     else:
         write_json(result, output)
     return result

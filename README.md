@@ -6,7 +6,7 @@ I evaluated them on a collection of 16,649 astronomy papers, using paper titles 
 
 Main finding: combining keyword and embedding search improved abstract searches. For titles, the improvement was inconclusive.
 
-[Full report](docs/report.md) | [Source code](src/astro_retrieval/)
+[Full report](docs/REPORT.md) | [Source code](src/astro_retrieval/)
 
 ## The experiment
 
@@ -46,7 +46,7 @@ Move right to include more results. Higher lines find more references, averaged 
 | Title | 17.9% | 18.1% | Improvement inconclusive |
 | Abstract | 24.4% | 26.3% | Gain of 1.9 percentage points supported |
 
-The planned statistical tests compared methods on the same papers and accounted for multiple comparisons. The curves show averages, with uncertainty intervals and full comparisons in the [report](docs/report.md).
+The planned statistical tests compared methods on the same papers and accounted for multiple comparisons. The curves show averages, with uncertainty intervals and full comparisons in the [report](docs/REPORT.md).
 
 - Embedding search alone did not beat keyword search on Recall@100 for either titles or abstracts.
 - Reranking had mixed results: it improved the top-ten ordering score for titles but reduced it for abstracts. Rearranging results cannot increase recall over the full list of 100.
@@ -81,7 +81,7 @@ py -3.14 -m venv .venv
 
 The tests use small examples and simulated model responses, so they need no API key or model weights. Installation includes model libraries such as PyTorch and can be large.
 
-The last command previews collection settings. Live collection requires `--collect` and credentials in a local, Git-excluded `.env` file.
+The last command previews collection settings. For live collection, copy [`.env.example`](.env.example) to `.env`, fill in `OPENALEX_API_KEY`, and use `--collect`. The `.env` file stays excluded from Git.
 
 ### Reproduce the saved experiment
 
@@ -102,3 +102,7 @@ Or rebuild the rankings and analysis into a new folder:
 The output folder must be new, have an existing parent, and be separate from the source data. Missing or changed inputs stop the run. The rebuild uses saved model outputs without network or model calls and publishes results only after matching the originals.
 
 The verified rebuild took 5 minutes 28 seconds, excluding initial downloads, model runs and judging. Downloading fresh data would create a new experiment.
+
+## License
+
+Project code is available under the [MIT License](LICENSE). Third-party models and data retain their own licenses and terms.

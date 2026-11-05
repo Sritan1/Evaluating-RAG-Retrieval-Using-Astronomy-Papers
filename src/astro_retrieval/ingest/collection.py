@@ -103,7 +103,7 @@ def run_collection(client, directory: Path, *, replay: bool = False, full: bool 
             "python_version", "current_run_api_usage", "reference_lookup_api_usage",
         )}
         if saved != {**bundle, "report": {**report, **original_run}}:
-            raise ValueError("Completed collection differs; use a new output directory")
+            raise ValueError("Completed collection differs. Use a new output directory")
     else:
         write_json(bundle, output)
     return report
