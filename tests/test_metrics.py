@@ -4,6 +4,7 @@ from copy import deepcopy
 import pytest
 from sklearn.metrics import ndcg_score, recall_score
 
+from astro_retrieval.baselines import baseline_ranking, score_run, summarize_scores
 from astro_retrieval.metrics import (
     bootstrap_mean, compare_hypotheses, holm_adjust, ndcg_at_k, paired_sign_flip,
     recall_at_k, reciprocal_rank_at_k, score_query,
@@ -131,3 +132,80 @@ def test_planned_contrasts_keep_papers_paired_and_validate_inputs():
     invalid["reranker"]["title"]["A"]["ndcg@10"] = float("nan")
     with pytest.raises(ValueError, match="finite"):
         compare_hypotheses(invalid)
+
+
+@pytest.fixture
+def baseline_inputs():
+    dates = {"W1": "2024-01-01", "W2": "2020-01-01", "W3": "2020-01-01",
+             "W4": "2022-01-01", "W5": "2024-01-01", "W6": "2025-01-01", "W7": None}
+    refs = [("W4", "W3"), ("W4", "W3"), ("W2", "W2"), ("W1", "W2"),
+            ("W5", "W2"), ("W6", "W2"), ("W7", "W2")]
+    evaluation = {"splits": {"dev": ["W1"], "test": ["W6"]}, "qrels": {"W1": ["W3"]},
+                  "queries": [{"query_id": f"W1:{form}", "paper_id": "W1",
+                               "query_type": form, "split": "dev"}
+                              for form in ("title", "abstract")]}
+    return dates, refs, evaluation
+
+
+def test_baselines_obey_dates_counts_and_determinism(baseline_inputs):
+    dates, refs, _ = baseline_inputs
+    assert baseline_ranking(dates, refs, "W1", "popularity") == ["W3", "W2", "W4"]
+    dates.update({f"W{i}": "2019-01-01" for i in range(10, 130)})
+    for system in ("random", "popularity"):
+        ranking = baseline_ranking(dates, refs, "W1", system)
+        assert len(ranking) == len(set(ranking)) == 100
+        assert not set(ranking) & {"W1", "W5", "W6", "W7"}
+        assert ranking == baseline_ranking(dict(reversed(list(dates.items()))),
+                                           list(reversed(refs)), "W1", system)
+    with pytest.raises(ValueError, match="known publication date"):
+        baseline_ranking(dates, refs, "missing", "random")
+
+
+def test_run_validation_and_paired_forms(baseline_inputs):
+    dates, _, evaluation = baseline_inputs
+    rankings = {f"W1:{form}": ["W3", "W2"] for form in ("title", "abstract")}
+    scores = score_run(rankings, evaluation, dates)
+    summary = summarize_scores(scores, resamples=50)
+    assert summary["title"] == summary["abstract"]
+    assert summary["title"]["mrr@100"]["mean"] == 1
+    for ranking in (["W3", "W3"], ["W1"], ["W5"], ["W99"], ["W3"] * 101):
+        with pytest.raises(ValueError):
+            score_run({**rankings, "W1:title": ranking}, evaluation, dates)
+    for bad in ({}, {**rankings, "W6:title": []}):
+        with pytest.raises(ValueError, match="exactly the development"):
+            score_run(bad, evaluation, dates)
+    bad_scores = deepcopy(scores)
+    bad_scores["abstract"] = {}
+    with pytest.raises(ValueError, match="identical papers"):
+        summarize_scores(bad_scores)
+
+
+def test_explicit_test_split_rejects_wrong_coverage(baseline_inputs):
+    dates, _, evaluation = baseline_inputs
+    evaluation["qrels"]["W6"] = ["W3"]
+    evaluation["queries"].extend({"query_id": f"W6:{form}", "paper_id": "W6",
+                                  "query_type": form, "split": "test"}
+                                 for form in ("title", "abstract"))
+    before = deepcopy(evaluation)
+    rankings = {f"W6:{form}": ["W3"] for form in ("title", "abstract")}
+    result = score_run(rankings, evaluation, dates, split="test")
+    assert set(result["title"]) == set(result["abstract"]) == {"W6"}
+    assert result["title"]["W6"]["recall@100"] == 1
+    with pytest.raises(ValueError, match="development"):
+        score_run(rankings, evaluation, dates)
+    dev = {f"W1:{form}": ["W3"] for form in ("title", "abstract")}
+    for bad in (dev, {**rankings, **dev}, {"W6:title": ["W3"]},
+                {**rankings, "W99:title": []}):
+        with pytest.raises(ValueError, match="exactly the test"):
+            score_run(bad, evaluation, dates, split="test")
+    dates.update(W8="2025-01-01", W9="2026-01-01")
+    for candidate in ("W6", "W7", "W8", "W9"):
+        with pytest.raises(ValueError, match="ineligible"):
+            score_run({**rankings, "W6:title": [candidate]}, evaluation, dates, split="test")
+    with pytest.raises(ValueError, match="Unknown"):
+        score_run(rankings, evaluation, dates, split="other")
+    overlap = deepcopy(evaluation)
+    overlap["splits"]["dev"].append("W6")
+    with pytest.raises(ValueError, match="disjoint"):
+        score_run(rankings, overlap, dates, split="test")
+    assert evaluation == before

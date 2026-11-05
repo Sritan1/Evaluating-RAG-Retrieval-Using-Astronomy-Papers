@@ -107,7 +107,9 @@ class OpenAlexClient:
                     has_usage_headers = any(
                         name.lower().startswith("x-ratelimit-") for name in response.headers
                     )
-                    if preflight and status == 200 and not has_usage_headers:
+                    if preflight and status == 200:
+                        if has_usage_headers:
+                            self.ledger.record(day, response.headers, credits)
                         try:
                             account = response.json()
                         except ValueError:
@@ -122,11 +124,10 @@ class OpenAlexClient:
                             if not isinstance(payload, dict):
                                 raise ValueError
                             json.dumps(payload, allow_nan=False)
-                            if not preflight:
-                                self._validate_payload(url, params, payload)
+                            self._validate_payload(url, params, payload)
                         except (ValueError, TypeError):
                             raise OpenAlexError("Invalid OpenAlex response") from None
-                        return {} if preflight else payload
+                        return payload
                     if status == 429:
                         remaining = self.ledger.totals(day)["remaining"]
                         if remaining < credits:

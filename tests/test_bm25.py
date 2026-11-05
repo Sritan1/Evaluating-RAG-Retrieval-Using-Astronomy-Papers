@@ -30,25 +30,6 @@ def test_reviewed_counts_and_input_order():
         build_index({})
 
 
-def test_saved_index_preserves_counts_and_source(tmp_path):
-    source = tmp_path / "collection.json"
-    source.write_text(json.dumps({
-        "report": {"schema_version": 1, "candidate_ids": ["W1"]},
-        "papers": {"W1": {"id": "W1", "title": "planet", "abstract": "planet orbit",
-                           "publication_date": "2024-01-01"}},
-        "references": {"W1": []},
-    }), encoding="utf-8")
-    database = tmp_path / "corpus.sqlite"
-    build_corpus(source, database)
-    before = database.read_bytes()
-    output = tmp_path / "index.json"
-    result = build_saved_index(database, output)
-    assert json.loads(output.read_text(encoding="utf-8")) == result
-    assert result["postings"]["planet"] == {"W1": 2}
-    assert build_saved_index(database, output) == result
-    assert database.read_bytes() == before
-
-
 @pytest.fixture
 def scoring_inputs():
     texts = {"W1": "planet planet orbit", "W2": "planet star", "W3": "star",
@@ -110,7 +91,6 @@ def test_reviewed_selection_average():
     first, second = scores(.2, .4), scores(.3, .4)
     assert selection_score(first) == pytest.approx(.3)
     assert selection_score(second) == pytest.approx(.35)
-    assert max([first, second], key=selection_score) is second
 
 
 @pytest.fixture

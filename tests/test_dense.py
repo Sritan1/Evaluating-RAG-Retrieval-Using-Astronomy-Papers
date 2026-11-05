@@ -88,7 +88,7 @@ def test_cosine_example_masks_ties_and_limits():
     assert [key for key, _ in ranked] == sorted(set(ids) - {"W0"})[:100]
 
 
-def test_dense_evaluation_requires_only_dev_queries(tmp_path):
+def test_dense_evaluation_requires_exact_explicit_split_without_changing_inputs(tmp_path):
     def encoder(texts):
         return [[1, 0] for _ in texts], [1] * len(texts)
 
@@ -97,16 +97,25 @@ def test_dense_evaluation_requires_only_dev_queries(tmp_path):
     queries = encode_cached({"Q:title": "query", "Q:abstract": "query"}, tmp_path / "queries",
                             encoder, source_sha256="s", settings=SETTINGS)
     evaluation = {"source_sha256": "s", "splits": {"dev": ["Q"], "test": ["T"]},
-                  "qrels": {"Q": ["A"]}, "queries": [
-                      {"query_id": f"Q:{form}", "paper_id": "Q", "query_type": form, "split": "dev"}
+                  "qrels": {"Q": ["A"], "T": ["A"]}, "queries": [
+                      {"query_id": f"{paper}:{form}", "paper_id": paper, "query_type": form, "split": split}
+                      for paper, split in (("Q", "dev"), ("T", "test"))
                       for form in ("title", "abstract")]}
     dates = {"A": "2020-01-01", "Q": "2024-01-01", "T": "2025-01-01"}
     result = evaluate_dense(documents, queries, evaluation, dates)
     assert result["rankings"] == {"Q:title": ["A"], "Q:abstract": ["A"]}
-    queries["ids"] = ["T:abstract", "T:title"]
-    queries["identity"]["ids"] = queries["ids"]
+    before = json.dumps(evaluation, sort_keys=True)
+    test_queries = encode_cached({"T:title": "test", "T:abstract": "test"}, tmp_path / "test-queries",
+                                 encoder, source_sha256="s", settings=SETTINGS)
+    result = evaluate_dense(documents, test_queries, evaluation, dates, split="test")
+    assert result["rankings"] == {"T:title": ["A", "Q"], "T:abstract": ["A", "Q"]}
     with pytest.raises(ValueError, match="exactly development"):
-        evaluate_dense(documents, queries, evaluation, dates)
+        evaluate_dense(documents, test_queries, evaluation, dates)
+    with pytest.raises(ValueError, match="exactly test"):
+        evaluate_dense(documents, queries, evaluation, dates, split="test")
+    with pytest.raises(ValueError, match="Unknown"):
+        evaluate_dense(documents, test_queries, evaluation, dates, split="other")
+    assert json.dumps(evaluation, sort_keys=True) == before
 
 
 @pytest.mark.parametrize("name,model,revision", [
@@ -147,7 +156,8 @@ def test_adapter_loads_locally_and_counts_before_truncation(monkeypatch, name, m
     def snapshot(model, **kwargs):
         assert kwargs["local_files_only"] and kwargs["token"] is False
         assert kwargs["revision"] == revision
-        assert "pytorch_model.bin" in kwargs["allow_patterns"]
+        weights = "model.safetensors" if name == "general" else "pytorch_model.bin"
+        assert kwargs["allow_patterns"] == ["*.json", "*.txt", "*.model", weights]
         calls["model"] = model
         return "local-snapshot"
 

@@ -44,14 +44,24 @@ def test_pair_cache_resumes_checks_identity_and_detects_corruption(tmp_path):
     pairs = {"Q1": [("A", "first", "paper")], "Q2": [("B", "second", "paper")]}
     path = tmp_path / "scores.json"
     scorer = Scorer()
+    with pytest.raises(ValueError, match="Complete pair"):
+        score_cached(pairs, path, scorer, identity={"source": "s"}, read_only=True)
+    assert not path.exists() and calls == []
     with pytest.raises(RuntimeError):
         score_cached(pairs, path, scorer, identity={"source": "s"})
     assert not json.loads(path.read_text())["complete"]
+    incomplete = path.read_bytes()
+    with pytest.raises(ValueError, match="Complete pair"):
+        score_cached(pairs, path, scorer, identity={"source": "s"}, read_only=True)
+    assert path.read_bytes() == incomplete and len(calls) == 2
     result = score_cached(pairs, path, scorer, identity={"source": "s"})
     assert calls == [("first", "paper"), ("second", "paper"), ("second", "paper")]
     assert result["Q1"]["token_lengths"] == [600]
     assert score_cached(pairs, path, scorer, identity={"source": "s"}) == result
     assert len(calls) == 3
+    saved_bytes, modified = path.read_bytes(), path.stat().st_mtime_ns
+    assert score_cached(pairs, path, scorer, identity={"source": "s"}, read_only=True) == result
+    assert path.read_bytes() == saved_bytes and path.stat().st_mtime_ns == modified and len(calls) == 3
     for changed_pairs, identity in (({**pairs, "Q1": [("A", "changed", "paper")]}, {"source": "s"}),
                                     (pairs, {"source": "other"})):
         with pytest.raises(ValueError, match="different inputs"):

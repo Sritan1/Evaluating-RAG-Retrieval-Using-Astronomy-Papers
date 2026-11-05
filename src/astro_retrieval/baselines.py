@@ -29,18 +29,22 @@ def baseline_ranking(dates, references, query_id, system, *, seed=42):
     return sorted(candidates, key=lambda key: (-counts[key], key))[:100]
 
 
-def score_run(rankings, evaluation, dates):
-    dev = set(evaluation["splits"]["dev"])
-    queries = {row["query_id"]: row for row in evaluation["queries"] if row["split"] == "dev"}
-    if not dev or dev & set(evaluation["splits"]["test"]):
-        raise ValueError("Development split must be nonempty and disjoint")
-    expected = {f"{paper}:{form}" for paper in dev for form in ("title", "abstract")}
-    if set(queries) != expected or set(rankings) != expected:
-        raise ValueError("Run must contain exactly the development queries")
+def score_run(rankings, evaluation, dates, *, split="dev"):
+    if split not in ("dev", "test"):
+        raise ValueError("Unknown evaluation split")
+    papers = set(evaluation["splits"][split])
+    rows = [row for row in evaluation["queries"] if row["split"] == split]
+    queries = {row["query_id"]: row for row in rows}
+    if not papers or set(evaluation["splits"]["dev"]) & set(evaluation["splits"]["test"]):
+        raise ValueError("Selected split must be nonempty and disjoint")
+    expected = {f"{paper}:{form}" for paper in papers for form in ("title", "abstract")}
+    if len(rows) != len(queries) or set(queries) != expected or set(rankings) != expected:
+        label = "development" if split == "dev" else "test"
+        raise ValueError(f"Run must contain exactly the {label} queries")
     scores = {"title": {}, "abstract": {}}
     for query_id, row in queries.items():
         paper, form = row["paper_id"], row["query_type"]
-        if paper not in dev or form not in scores or query_id != f"{paper}:{form}":
+        if paper not in papers or form not in scores or query_id != f"{paper}:{form}":
             raise ValueError("Invalid query identity")
         ranking = rankings[query_id]
         if not isinstance(ranking, list) or len(ranking) > 100:

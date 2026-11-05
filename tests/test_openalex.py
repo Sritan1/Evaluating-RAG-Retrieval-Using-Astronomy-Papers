@@ -23,7 +23,10 @@ def response(payload=None, *, status=200, remaining=9000, used=0, retry_after=No
     })
     if retry_after is not None:
         result.headers["Retry-After"] = retry_after
-    result.json.return_value = {} if payload is None else payload
+    result.json.return_value = {"rate_limit": {
+        "daily_budget_usd": 1, "daily_used_usd": 0, "daily_remaining_usd": 1,
+        "prepaid_balance_usd": 0, "prepaid_remaining_usd": 0, "resets_in_seconds": 3600,
+    }} if payload is None else payload
     return result
 
 
@@ -34,6 +37,23 @@ def account_response():
     }})
     value.headers.clear()
     return value
+
+
+@pytest.mark.parametrize("payload", [{}, {"rate_limit": {
+    "daily_budget_usd": 1, "daily_used_usd": 0, "daily_remaining_usd": 1,
+    "prepaid_balance_usd": 5, "prepaid_remaining_usd": 5, "resets_in_seconds": 3600,
+}}])
+def test_usage_headers_cannot_bypass_account_validation(rig, payload):
+    client, session, sleep, ledger, _ = rig
+    account = response(payload)
+    session.get.return_value = account
+    with pytest.raises(BudgetError, match="account allowance"):
+        client.get("/works")
+    assert ledger.totals()["blocked"] == 1
+    assert ledger.totals()["reserved"] == 1
+    session.get.assert_called_once()
+    sleep.assert_not_called()
+    account.close.assert_called_once()
 
 
 def test_recovery_preserves_history_and_allows_work_then_cache(rig, tmp_path):
@@ -114,24 +134,20 @@ def test_headerless_account_check_then_work_keeps_account_response_private(rig, 
         assert b"private-account-key" not in path.read_bytes()
 
 
-def test_headerless_work_still_blocks_after_valid_account(rig):
+@pytest.mark.parametrize("stage", ["account", "work"])
+def test_incomplete_usage_headers_block_collection(rig, stage):
     client, session, _, ledger, _ = rig
-    work = response({"results": []})
-    work.headers.clear()
-    session.get.side_effect = [account_response(), work]
+    if stage == "account":
+        account = account_response()
+        account.headers["X-RateLimit-Limit"] = "10000"
+        session.get.side_effect = [account]
+    else:
+        work = response({"results": []})
+        work.headers.clear()
+        session.get.side_effect = [account_response(), work]
     with pytest.raises(BudgetError, match="usage headers"):
         client.get("/works")
-    assert ledger.totals()["blocked"] == 1
-
-
-def test_partial_account_headers_do_not_fall_back(rig):
-    client, session, _, ledger, _ = rig
-    account = account_response()
-    account.headers["X-RateLimit-Limit"] = "10000"
-    session.get.return_value = account
-    with pytest.raises(BudgetError, match="usage headers"):
-        client.get("/works")
-    assert session.get.call_count == 1
+    assert session.get.call_count == (1 if stage == "account" else 2)
     assert ledger.totals()["blocked"] == 1
 
 
@@ -275,17 +291,6 @@ def test_preflight_timeout_is_counted_and_retried(rig):
     assert session.get.call_count == 3
     sleep.assert_called_once_with(1)
     assert ledger.totals()["reserved"] == 12
-
-
-def test_missing_account_headers_and_budget_stop_before_work_and_close_response(rig):
-    client, session, _, _, _ = rig
-    preflight = response()
-    preflight.headers.clear()
-    session.get.return_value = preflight
-    with pytest.raises(BudgetError, match="account allowance"):
-        client.get("/works")
-    session.get.assert_called_once()
-    preflight.close.assert_called_once()
 
 
 def test_singleton_reserves_one_credit_and_requires_a_work_object(rig):

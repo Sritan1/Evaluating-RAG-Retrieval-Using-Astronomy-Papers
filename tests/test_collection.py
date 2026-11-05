@@ -1,4 +1,6 @@
+import copy
 import json
+import random
 import os
 from unittest.mock import Mock
 
@@ -13,6 +15,8 @@ from astro_retrieval.ingest.collection import (
     candidate_parameters, collect_candidates, load_candidates, run_collection,
 )
 from astro_retrieval.ingest.openalex import OpenAlexClient, OpenAlexError
+from astro_retrieval.ingest.pilot import select_pilot
+from astro_retrieval.ingest.records import reconstruct_abstract
 
 
 @pytest.fixture(autouse=True)
@@ -153,14 +157,17 @@ def test_full_run_resumes_budget_stop_and_replays_without_touching_pilot(client,
     original = {path.name: path.read_bytes() for path in pilot.iterdir()}
     full = tmp_path / "data/full"
 
-    def response(payload):
+    def response(payload=None):
         value = Mock(spec=requests.Response)
         value.status_code = 200
         value.headers = {
             "X-RateLimit-Limit": "10000", "X-RateLimit-Remaining": "9000",
             "X-RateLimit-Credits-Used": "0", "X-RateLimit-Reset": "3600",
         }
-        value.json.return_value = payload
+        value.json.return_value = {"rate_limit": {
+            "daily_budget_usd": 1, "daily_used_usd": 0, "daily_remaining_usd": 1,
+            "prepaid_balance_usd": 0, "prepaid_remaining_usd": 0, "resets_in_seconds": 3600,
+        }} if payload is None else payload
         return value
 
     def reference(identifier):
@@ -168,7 +175,7 @@ def test_full_run_resumes_budget_stop_and_replays_without_touching_pilot(client,
 
     monkeypatch.setenv("OPENALEX_API_KEY", "dummy-full-key")
     session = Mock(spec=requests.Session)
-    session.get.side_effect = [response({}), response({
+    session.get.side_effect = [response(), response({
         "results": [reference("W1001")], "meta": {"next_cursor": "page-two"},
     })]
     cache_path = tmp_path / ".cache/openalex.sqlite"
@@ -183,7 +190,7 @@ def test_full_run_resumes_budget_stop_and_replays_without_touching_pilot(client,
     assert len(json.loads(selection)["candidate_ids"]) == 600
 
     session.reset_mock()
-    session.get.side_effect = [response({}), response({
+    session.get.side_effect = [response(), response({
         "results": [reference("W1002")], "meta": {"next_cursor": None},
     })]
     with ResponseCache(cache_path) as cache, UsageLedger(ledger_path) as ledger:
@@ -208,3 +215,105 @@ def test_full_run_resumes_budget_stop_and_replays_without_touching_pilot(client,
     with UsageLedger(ledger_path) as ledger:
         assert ledger.usage_totals()["attempts"] == 4
     assert {path.name: path.read_bytes() for path in pilot.iterdir()} == original
+
+
+def test_sampling_is_independent_of_input_order_and_duplicates():
+    works = [{"id": f"https://openalex.org/W{number}"} for number in range(1, 11)]
+    before = random.getstate()
+    first = select_pilot(works, size=4, seed=42)
+    reordered = select_pilot(reversed(works + [works[0], {"id": "W1"}]), size=4, seed=42)
+    assert first == reordered
+    assert first.seed == 42 and random.getstate() == before
+    assert select_pilot(works, size=4, seed=7).candidate_ids != first.candidate_ids
+    assert len(first.candidate_ids) == len(set(first.candidate_ids)) == 4
+    assert set(first.candidate_ids) <= {f"W{number}" for number in range(1, 11)}
+
+
+def test_coverage_includes_missing_and_invalid_abstracts():
+    works = [
+        {"id": "W1", "abstract_inverted_index": {"planets": [0, 2], "orbit": [1]}},
+        {"id": "W2", "abstract_inverted_index": None},
+        {"id": "W3", "abstract_inverted_index": {}},
+        {"id": "W4", "abstract_inverted_index": {"bad": [1]}},
+    ]
+    original = copy.deepcopy(works)
+    sample = select_pilot(works)
+    assert sample.requested_size == 200
+    assert len(sample.candidate_ids) == 4
+    assert sample.abstracts == {"W1": "planets orbit planets"}
+    assert set(sample.missing_ids) == {"W2", "W3"}
+    assert sample.invalid_ids == ("W4",)
+    assert sample.abstract_coverage == 0.25
+    assert works == original
+
+
+def test_abstract_availability_does_not_change_selection_or_trigger_replacement():
+    works = [{"id": f"W{number}", "abstract_inverted_index": {"word": [0]}}
+             for number in range(1, 11)]
+    complete = select_pilot(works, size=3)
+    changed_id = complete.candidate_ids[0]
+    next(work for work in works if work["id"] == changed_id)["abstract_inverted_index"] = None
+    missing = select_pilot(works, size=3)
+    assert missing.candidate_ids == complete.candidate_ids
+    assert missing.missing_ids == (changed_id,)
+    assert len(missing.abstracts) == 2
+    assert missing.abstract_coverage == pytest.approx(2 / 3)
+
+
+def test_conflicting_duplicates_raise_in_either_order():
+    works = [{"id": "W1", "title": "first"}, {"id": "https://openalex.org/W1", "title": "second"}]
+    for candidates in (works, list(reversed(works))):
+        with pytest.raises(ValueError, match="Conflicting"):
+            select_pilot(candidates)
+
+
+@pytest.mark.parametrize("work", [None, {}, {"id": "https://example.org/W1"}])
+def test_invalid_candidate_ids_raise(work):
+    with pytest.raises(ValueError):
+        select_pilot([work])
+
+
+def test_reconstructs_repeated_words_in_position_order():
+    index = {"planets": [2, 0], "orbit": [1]}
+    assert reconstruct_abstract(index) == "planets orbit planets"
+    assert index == {"planets": [2, 0], "orbit": [1]}
+    assert reconstruct_abstract({"planet.": [2], "A": [0], "β": [1]}) == "A β planet."
+
+
+@pytest.mark.parametrize("index", [
+    [], {"word": [-1]}, {"word": [True]}, {"word": []}, {"": [0]},
+])
+def test_malformed_index_raises(index):
+    with pytest.raises(ValueError):
+        reconstruct_abstract(index)
+
+
+@pytest.mark.parametrize("index", [
+    {"one": [0], "two": [0]}, {"word": [0, 0]},
+])
+def test_overlapping_positions_raise(index):
+    with pytest.raises(ValueError, match="overlap"):
+        reconstruct_abstract(index)
+
+
+@pytest.mark.parametrize("index", [
+    {"one": [0], "three": [2]}, {"word": [10**12]},
+])
+def test_missing_positions_raise_without_allocating_from_largest_position(index):
+    with pytest.raises(ValueError, match="contiguous"):
+        reconstruct_abstract(index)
+
+
+@pytest.mark.parametrize("works,ids,coverage", [
+    ([], (), None), ([{"id": "W1"}, {"id": "W1"}], ("W1",), 0),
+])
+def test_small_or_empty_pool(works, ids, coverage):
+    sample = select_pilot(works)
+    assert sample.candidate_ids == ids
+    assert sample.abstracts == {} and sample.abstract_coverage == coverage
+
+
+@pytest.mark.parametrize("options", [{"size": 0}, {"seed": "42"}])
+def test_invalid_sampling_settings(options):
+    with pytest.raises(ValueError):
+        select_pilot([], **options)

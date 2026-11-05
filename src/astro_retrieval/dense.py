@@ -26,7 +26,8 @@ def normalize_vectors(values):
     return (vectors / norms[:, None]).astype(np.float32)
 
 
-def encode_cached(texts, directory, encoder, *, source_sha256, settings, chunk_size=256, progress=None):
+def encode_cached(texts, directory, encoder, *, source_sha256, settings, chunk_size=256, progress=None,
+                  read_only=False):
     if not texts or any(not isinstance(key, str) or not key for key in texts):
         raise ValueError("Encoding requires nonempty text IDs")
     if any(not isinstance(text, str) or not text.strip() for text in texts.values()):
@@ -44,6 +45,8 @@ def encode_cached(texts, directory, encoder, *, source_sha256, settings, chunk_s
     }, allow_nan=False))
     directory = Path(directory)
     manifest_path = directory / "manifest.json"
+    if read_only and not manifest_path.is_file():
+        raise ValueError("Complete document cache required")
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("schema_version") != 1 or manifest["identity"] != identity:
@@ -51,6 +54,8 @@ def encode_cached(texts, directory, encoder, *, source_sha256, settings, chunk_s
     else:
         manifest = {"schema_version": 1, "identity": identity, "complete": False, "chunks": {}}
         write_json(manifest, manifest_path)
+    if read_only and not manifest["complete"]:
+        raise ValueError("Complete document cache required")
     batches, token_counts = [], []
     dimension = None
     for start in range(0, len(ids), chunk_size):
@@ -98,7 +103,8 @@ def encode_cached(texts, directory, encoder, *, source_sha256, settings, chunk_s
     manifest.update(complete=True, dimension=dimension,
                     truncated_count=sum(count > settings["max_tokens"] for count in token_counts),
                     longest_input_tokens=max(token_counts))
-    write_json(manifest, manifest_path)
+    if not read_only:
+        write_json(manifest, manifest_path)
     return {"ids": ids, "vectors": np.concatenate(batches), "token_lengths": token_counts,
             "identity": identity}
 
@@ -119,20 +125,24 @@ def rank_dense(document_ids, document_vectors, query_vector, dates, query_id):
                    if key in eligible), key=lambda row: (-row[1], row[0]))[:100]
 
 
-def evaluate_dense(documents, queries, evaluation, dates):
+def evaluate_dense(documents, queries, evaluation, dates, *, split="dev"):
+    if split not in ("dev", "test"):
+        raise ValueError("Unknown evaluation split")
     if documents["identity"]["settings"] != queries["identity"]["settings"]:
         raise ValueError("Document and query model settings must match")
     if any(bundle["identity"]["source_sha256"] != evaluation["source_sha256"]
            or bundle["ids"] != bundle["identity"]["ids"] for bundle in (documents, queries)):
         raise ValueError("Embedding source or vector identities differ")
-    expected = sorted(f"{key}:{form}" for key in evaluation["splits"]["dev"]
+    expected = sorted(f"{key}:{form}" for key in evaluation["splits"][split]
                       for form in ("title", "abstract"))
     if queries["ids"] != expected or len(queries["vectors"]) != len(expected):
-        raise ValueError("Query vectors must contain exactly development queries")
+        label = "development" if split == "dev" else "test"
+        raise ValueError(f"Query vectors must contain exactly {label} queries")
+    score_run({key: [] for key in expected}, evaluation, dates, split=split)
     rankings = {key: [paper for paper, _ in rank_dense(
         documents["ids"], documents["vectors"], vector, dates, key.rsplit(":", 1)[0])]
         for key, vector in zip(queries["ids"], queries["vectors"])}
-    scores = score_run(rankings, evaluation, dates)
+    scores = score_run(rankings, evaluation, dates, split=split)
     return {"rankings": rankings, "scores": scores, "summary": summarize_scores(scores)}
 
 
@@ -174,10 +184,11 @@ class EmbeddingEncoder:
                 torch.set_num_interop_threads(1)
             torch.manual_seed(42)
             torch.use_deterministic_algorithms(True)
+            weights = ("model.safetensors" if self.settings["model"] == "sentence-transformers/all-MiniLM-L6-v2"
+                       else "pytorch_model.bin")
             folder = snapshot_download(self.settings["model"], revision=self.settings["revision"],
                                        cache_dir=self.model_cache, local_files_only=True, token=False,
-                                       allow_patterns=["*.json", "*.txt", "*.model", "*.safetensors",
-                                                       "pytorch_model.bin"])
+                                       allow_patterns=["*.json", "*.txt", "*.model", weights])
             self.model = SentenceTransformer(folder, device="cpu", local_files_only=True,
                                             trust_remote_code=False, token=False)
             self.model.float()

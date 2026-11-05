@@ -39,7 +39,7 @@ def _digest(value):
     return hashlib.sha256(raw).hexdigest()
 
 
-def score_cached(pairs, path, scorer, *, identity, progress=None):
+def score_cached(pairs, path, scorer, *, identity, progress=None, read_only=False):
     path = Path(path)
     cache_identity = {"inputs": identity, "settings": scorer.settings, "pairs_sha256": _digest(pairs)}
     cache_identity = json.loads(json.dumps(cache_identity, allow_nan=False))
@@ -48,8 +48,12 @@ def score_cached(pairs, path, scorer, *, identity, progress=None):
         if cache.get("schema_version") != 1 or cache["identity"] != cache_identity:
             raise ValueError("Saved pair scores have different inputs or settings")
     else:
+        if read_only:
+            raise ValueError("Complete pair score cache required")
         cache = {"schema_version": 1, "identity": cache_identity, "complete": False, "queries": {}}
         write_json(cache, path)
+    if read_only and not cache["complete"]:
+        raise ValueError("Complete pair score cache required")
     if not set(cache["queries"]) <= set(pairs):
         raise ValueError("Saved scores contain unexpected queries")
     for number, query in enumerate(sorted(pairs), start=1):
@@ -80,7 +84,8 @@ def score_cached(pairs, path, scorer, *, identity, progress=None):
         if progress is not None:
             progress({"completed": number, "total": len(pairs)})
     cache["complete"] = True
-    write_json(cache, path)
+    if not read_only:
+        write_json(cache, path)
     return {query: saved["row"] for query, saved in cache["queries"].items()}
 
 
